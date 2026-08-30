@@ -75,7 +75,7 @@ async function startBot() {
 
     const from = msg.key.remoteJid;
     const isGroup = from.endsWith('@g.us');
-    const sender = isGroup ? (msg.key.participantPn || msg.key.participant) : (msg.key.remoteJidAlt || from);
+    const sender = isGroup ? (msg.key.participantPn || msg.key.participant) : (msg.key.senderPn || msg.key.remoteJidAlt || from);
     const text = extractText(msg);
     console.log('INCOMING', JSON.stringify({ from, isGroup, sender, key: msg.key, text }));
     if (!text) return;
@@ -84,7 +84,7 @@ async function startBot() {
       if (isGroup) {
         await handleGroupMessage(sock, from, sender, text);
       } else {
-        await handlePrivateMessage(sock, sender, text);
+        await handlePrivateMessage(sock, from, sender, text);
       }
     } catch (err) {
       console.error('handler error:', err);
@@ -92,32 +92,32 @@ async function startBot() {
   });
 }
 
-async function handlePrivateMessage(sock, from, text) {
+async function handlePrivateMessage(sock, chatJid, identityJid, text) {
   const clean = text.trim().toLowerCase();
 
   if (['hi', 'hello', 'hey', 'menu'].includes(clean)) {
-    const user = db.getUser(from);
+    const user = db.getUser(identityJid);
     if (!user?.societyGroupJid) {
-      db.setUserState(from, 'awaiting_code');
-      await sock.sendMessage(from, { text: 'Welcome to Bellboy 👋\nPlease enter your society code to get started.' });
+      db.setUserState(identityJid, 'awaiting_code');
+      await sock.sendMessage(chatJid, { text: 'Welcome to Bellboy 👋\nPlease enter your society code to get started.' });
     } else {
-      db.setUserState(from, 'menu');
-      await sock.sendMessage(from, { text: 'What would you like to do?\n1. Check maintenance dues\n2. Register a complaint\n\nReply with 1 or 2.' });
+      db.setUserState(identityJid, 'menu');
+      await sock.sendMessage(chatJid, { text: 'What would you like to do?\n1. Check maintenance dues\n2. Register a complaint\n\nReply with 1 or 2.' });
     }
     return;
   }
 
-  const state = db.getUserState(from);
+  const state = db.getUserState(identityJid);
 
   if (state === 'awaiting_code') {
     const society = db.getSocietyByCode(text.trim());
     if (!society) {
-      await sock.sendMessage(from, { text: 'Code not recognized. Please check with your society admin and try again.' });
+      await sock.sendMessage(chatJid, { text: 'Code not recognized. Please check with your society admin and try again.' });
       return;
     }
-    db.linkUserToSociety(from, society.groupJid);
-    db.setUserState(from, 'menu');
-    await sock.sendMessage(from, {
+    db.linkUserToSociety(identityJid, society.groupJid);
+    db.setUserState(identityJid, 'menu');
+    await sock.sendMessage(chatJid, {
       text: `Linked to ${society.name} ✅\n\nWhat would you like to do?\n1. Check maintenance dues\n2. Register a complaint\n\nReply with 1 or 2.`,
     });
     return;
@@ -125,26 +125,26 @@ async function handlePrivateMessage(sock, from, text) {
 
   if (state === 'menu') {
     if (clean === '1') {
-      await sock.sendMessage(from, { text: 'Maintenance status: no dues pending. (placeholder — connect to billing system)' });
+      await sock.sendMessage(chatJid, { text: 'Maintenance status: no dues pending. (placeholder — connect to billing system)' });
     } else if (clean === '2') {
-      db.setUserState(from, 'awaiting_complaint');
-      await sock.sendMessage(from, { text: 'Please describe your complaint in one message.' });
+      db.setUserState(identityJid, 'awaiting_complaint');
+      await sock.sendMessage(chatJid, { text: 'Please describe your complaint in one message.' });
     } else {
-      await sock.sendMessage(from, { text: 'Please reply with 1 or 2.' });
+      await sock.sendMessage(chatJid, { text: 'Please reply with 1 or 2.' });
     }
     return;
   }
 
   if (state === 'awaiting_complaint') {
-    const user = db.getUser(from);
+    const user = db.getUser(identityJid);
     const society = db.getSocietyByGroupJid(user.societyGroupJid);
-    await sock.sendMessage(society.groupJid, { text: `📢 New complaint\nFrom: ${from.split('@')[0]}\n\n${text}` });
-    await sock.sendMessage(from, { text: 'Complaint forwarded to your society ✅' });
-    db.setUserState(from, 'menu');
+    await sock.sendMessage(society.groupJid, { text: `📢 New complaint\nFrom: ${identityJid.split('@')[0]}\n\n${text}` });
+    await sock.sendMessage(chatJid, { text: 'Complaint forwarded to your society ✅' });
+    db.setUserState(identityJid, 'menu');
     return;
   }
 
-  await sock.sendMessage(from, { text: "Say 'hi' to get started." });
+  await sock.sendMessage(chatJid, { text: "Say 'hi' to get started." });
 }
 
 async function handleGroupMessage(sock, groupJid, sender, text) {
