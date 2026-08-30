@@ -2,10 +2,6 @@ services:
   - type: web
     name: bellboy-whatsapp-bot
     env: node
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: npm start
-    disk:
-      name: bellboy-data
-      mountPath: /opt/render/project/src
-      sizeGB: 1
