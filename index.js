@@ -40,12 +40,26 @@ async function startBot() {
   });
 
   sock.ev.on('group-participants.update', async (event) => {
-    if (event.action !== 'add') return;
     const botNumber = sock.user.id.split(':')[0];
+    const groupJid = event.id;
+
+    if (event.action === 'promote') {
+      const botPromoted = event.participants.some((p) => p.startsWith(botNumber));
+      if (botPromoted) {
+        try {
+          await sock.groupSettingUpdate(groupJid, 'announcement');
+          await sock.sendMessage(groupJid, { text: 'I was made admin — this group is now locked to admin-only messaging.' });
+        } catch (err) {
+          console.error('lock group failed:', err);
+        }
+      }
+      return;
+    }
+
+    if (event.action !== 'add') return;
     const botAdded = event.participants.some((p) => p.startsWith(botNumber));
     if (!botAdded) return;
 
-    const groupJid = event.id;
     const inviter = event.author;
     db.registerPendingSociety(groupJid, inviter);
 
@@ -61,15 +75,16 @@ async function startBot() {
 
     const from = msg.key.remoteJid;
     const isGroup = from.endsWith('@g.us');
-    const sender = isGroup ? msg.key.participant : from;
+    const sender = isGroup ? (msg.key.participantPn || msg.key.participant) : (msg.key.remoteJidAlt || from);
     const text = extractText(msg);
+    console.log('INCOMING', JSON.stringify({ from, isGroup, sender, key: msg.key, text }));
     if (!text) return;
 
     try {
       if (isGroup) {
         await handleGroupMessage(sock, from, sender, text);
       } else {
-        await handlePrivateMessage(sock, from, text);
+        await handlePrivateMessage(sock, sender, text);
       }
     } catch (err) {
       console.error('handler error:', err);
@@ -193,12 +208,19 @@ async function handleGroupMessage(sock, groupJid, sender, text) {
   }
 
   if (state === 'awaiting_text') {
-    const members = metadata.participants.map((p) => p.id).filter((id) => id !== sender);
+    const members = metadata.participants.map((p) => p.id).filter((id) => id !== sender && !id.startsWith(sock.user.id.split(':')[0]));
+    let sentCount = 0;
     for (const member of members) {
-      await sock.sendMessage(member, { text: `📢 Announcement from ${society.name}:\n\n${text}` });
+      try {
+        await sock.sendMessage(member, { text: `📢 Announcement from ${society.name}:\n\n${text}` });
+        sentCount++;
+      } catch (err) {
+        console.error('announcement send failed for', member, err.message);
+      }
+      await new Promise((r) => setTimeout(r, 400));
     }
     db.clearGroupAdminState(groupJid, sender);
-    await sock.sendMessage(groupJid, { text: 'Announcement sent to all members ✅' });
+    await sock.sendMessage(groupJid, { text: `Announcement sent to ${sentCount}/${members.length} members ✅` });
     return;
   }
 }
@@ -242,6 +264,13 @@ app.get('/seed', (req, res) => {
   db.linkUserToSociety(residentJid, groupJid);
   db.setUserState(residentJid, 'menu');
   res.send(`Seeded "${name}" (code: ${code}) for group ${groupJid}, linked resident ${residentJid}. This did NOT change the group's admin-only setting.`);
+});
+app.get('/debug', (req, res) => {
+  const fs = require('fs');
+  const path = require('path');
+  const file = path.join(__dirname, 'data.json');
+  if (!fs.existsSync(file)) return res.send('No data.json yet.');
+  res.type('json').send(fs.readFileSync(file, 'utf8'));
 });
 app.listen(process.env.PORT || 3000);
 
