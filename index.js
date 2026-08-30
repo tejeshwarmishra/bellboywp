@@ -1,8 +1,10 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const P = require('pino');
-const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const express = require('express');
 const db = require('./db');
+
+let latestQR = null;
 
 function extractText(msg) {
   return (
@@ -22,11 +24,15 @@ async function startBot() {
     printQRInTerminal: false,
   });
 
+  global.sock = sock;
+  global.creds = state.creds;
+
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
-    if (qr) qrcode.generate(qr, { small: true });
+    if (qr) latestQR = qr;
+    if (connection === 'open') latestQR = null;
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       if (statusCode !== DisconnectReason.loggedOut) startBot();
@@ -180,6 +186,23 @@ async function handleGroupMessage(sock, groupJid, sender, text) {
 
 const app = express();
 app.get('/', (req, res) => res.send('Bellboy bot running'));
+app.get('/qr', async (req, res) => {
+  if (!latestQR) return res.send('No QR pending — either already logged in, or waiting on connection. Refresh in a few seconds.');
+  const dataUrl = await QRCode.toDataURL(latestQR);
+  res.send(`<html><body style="text-align:center"><img src="${dataUrl}"/><script>setTimeout(()=>location.reload(),5000)</script></body></html>`);
+});
+app.get('/pair', async (req, res) => {
+  const number = req.query.number; // e.g. 919876543210, no + or spaces
+  if (!number) return res.send('Add your WhatsApp number: /pair?number=91XXXXXXXXXX');
+  if (!global.sock) return res.send('Bot not started yet, try again shortly.');
+  if (global.creds?.registered) return res.send('Already logged in.');
+  try {
+    const code = await global.sock.requestPairingCode(number);
+    res.send(`Pairing code: ${code}\n\nOn your phone: WhatsApp > Linked Devices > Link a Device > Link with phone number instead > enter this code.`);
+  } catch (err) {
+    res.send('Error requesting pairing code: ' + err.message);
+  }
+});
 app.listen(process.env.PORT || 3000);
 
 startBot();
