@@ -133,6 +133,25 @@ async function handlePrivateMessage(sock, from, text) {
 }
 
 async function handleGroupMessage(sock, groupJid, sender, text) {
+  const existingSociety = db.getSocietyByGroupJid(groupJid);
+
+  if (!existingSociety && text.trim().toLowerCase().startsWith('/setup ')) {
+    const metadata = await sock.groupMetadata(groupJid);
+    const participant = metadata.participants.find((p) => p.id === sender);
+    const isAdmin = participant?.admin === 'admin' || participant?.admin === 'superadmin';
+    if (!isAdmin) {
+      await sock.sendMessage(groupJid, { text: 'Only a group admin can run /setup.' });
+      return;
+    }
+    const name = text.trim().slice(7).trim();
+    const code = db.finalizeSociety(groupJid, name);
+    await sock.groupSettingUpdate(groupJid, 'announcement');
+    await sock.sendMessage(groupJid, {
+      text: `Society "${name}" registered ✅\nGroup is now admin-only.\nShare this code with residents to register: ${code}`,
+    });
+    return;
+  }
+
   const pending = db.getPendingSociety(groupJid);
   if (pending) {
     if (sender !== pending.inviter) return;
@@ -202,6 +221,27 @@ app.get('/pair', async (req, res) => {
   } catch (err) {
     res.send('Error requesting pairing code: ' + err.message);
   }
+});
+app.get('/groups', async (req, res) => {
+  if (!global.sock) return res.send('Bot not started yet.');
+  try {
+    const groups = await global.sock.groupFetchAllParticipating();
+    const list = Object.values(groups).map((g) => `${g.id}  —  ${g.subject}`);
+    res.send('<pre>' + list.join('\n') + '</pre>');
+  } catch (err) {
+    res.send('Error: ' + err.message);
+  }
+});
+app.get('/seed', (req, res) => {
+  const { groupJid, name, resident } = req.query;
+  if (!groupJid || !name || !resident) {
+    return res.send('Usage: /seed?groupJid=XXXX@g.us&name=TestSociety&resident=919821343638');
+  }
+  const code = db.finalizeSociety(groupJid, name);
+  const residentJid = resident.includes('@') ? resident : `${resident}@s.whatsapp.net`;
+  db.linkUserToSociety(residentJid, groupJid);
+  db.setUserState(residentJid, 'menu');
+  res.send(`Seeded "${name}" (code: ${code}) for group ${groupJid}, linked resident ${residentJid}. This did NOT change the group's admin-only setting.`);
 });
 app.listen(process.env.PORT || 3000);
 
