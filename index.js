@@ -245,4 +245,16 @@ app.get('/seed', (req, res) => {
 });
 app.listen(process.env.PORT || 3000);
 
+function autoSeed() {
+  const { SEED_GROUP_JID, SEED_SOCIETY_NAME, SEED_RESIDENT } = process.env;
+  if (!SEED_GROUP_JID || !SEED_SOCIETY_NAME || !SEED_RESIDENT) return;
+  if (db.getSocietyByGroupJid(SEED_GROUP_JID)) return;
+  const code = db.finalizeSociety(SEED_GROUP_JID, SEED_SOCIETY_NAME);
+  const residentJid = SEED_RESIDENT.includes('@') ? SEED_RESIDENT : `${SEED_RESIDENT}@s.whatsapp.net`;
+  db.linkUserToSociety(residentJid, SEED_GROUP_JID);
+  db.setUserState(residentJid, 'menu');
+  console.log(`Auto-seeded ${SEED_SOCIETY_NAME} (${code}) for ${SEED_GROUP_JID}`);
+}
+
+autoSeed();
 startBot();
