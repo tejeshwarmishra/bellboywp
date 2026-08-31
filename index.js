@@ -46,21 +46,19 @@ async function startBot() {
 
   sock.ev.on('group-participants.update', async (event) => {
     if (event.action !== 'promote') return;
-    const botNumber = sock.user.id.split(':')[0];
-    const botPromoted = event.participants.some((p) => p.startsWith(botNumber));
-    if (!botPromoted) return;
-
     const groupJid = event.id;
+    if (db.getGroupJid() === groupJid) return; // already linked
+
     try {
-      db.setGroupJid(groupJid);
       await sock.groupSettingUpdate(groupJid, 'announcement');
       await sock.groupSettingUpdate(groupJid, 'locked');
+      db.setGroupJid(groupJid);
       await sock.sendMessage(groupJid, {
-        text: "BellBoy is now active as group admin 🤖\n\nThis group is now admin-only for messaging and group info edits. I'll route resident complaints, dues reminders, and society announcements here automatically.",
+        text: "Hi, I am BellBoy 🤖 and I will be of your service.",
       });
       console.log('Group linked and locked:', groupJid);
     } catch (err) {
-      console.error('group takeover failed:', err);
+      console.error('group takeover attempt failed (likely not actually promoted, or a different participant was promoted):', err.message);
     }
   });
 
@@ -169,6 +167,20 @@ async function handleAdmin(sock, chatJid, identityJid, clean, text) {
   const state = db.getUserState(identityJid);
   const groupJid = db.getGroupJid();
 
+  if (clean.startsWith('/link ')) {
+    const targetJid = text.trim().split(/\s+/)[1];
+    try {
+      await sock.groupSettingUpdate(targetJid, 'announcement');
+      await sock.groupSettingUpdate(targetJid, 'locked');
+      db.setGroupJid(targetJid);
+      await sock.sendMessage(targetJid, { text: 'Hi, I am BellBoy 🤖 and I will be of your service.' });
+      await sock.sendMessage(chatJid, { text: `Linked ✅ ${targetJid}` });
+    } catch (err) {
+      await sock.sendMessage(chatJid, { text: `Failed to link: ${err.message}\nMake sure BellBoy is already an admin in that group.` });
+    }
+    return;
+  }
+
   if (state === 'menu') {
     if (clean === '1') {
       if (!groupJid) return sock.sendMessage(chatJid, { text: 'No group linked yet. Add and promote the bot to admin in the society group first.' });
@@ -221,6 +233,17 @@ app.get('/pair', async (req, res) => {
     res.send(`Pairing code: ${code}\n\nOn your phone: WhatsApp > Linked Devices > Link a Device > Link with phone number instead > enter this code.`);
   } catch (err) {
     res.send('Error requesting pairing code: ' + err.message);
+  }
+});
+
+app.get('/groups', async (req, res) => {
+  if (!global.sock) return res.send('Bot not started yet.');
+  try {
+    const groups = await global.sock.groupFetchAllParticipating();
+    const list = Object.values(groups).map((g) => `${g.id}  —  ${g.subject}`);
+    res.send('<pre>' + list.join('\n') + '</pre>');
+  } catch (err) {
+    res.send('Error: ' + err.message);
   }
 });
 
