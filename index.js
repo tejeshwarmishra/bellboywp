@@ -6,6 +6,11 @@ const db = require('./db');
 
 let latestQR = null;
 
+const RESIDENT_KEY = process.env.RESIDENT_ACCESS_KEY || 'RES123';
+const ADMIN_KEY = process.env.ADMIN_ACCESS_KEY || 'ADM999';
+const DUES_AMOUNT = '₹3,000';
+const DUES_DEADLINE = '5th of this month';
+
 function extractText(msg) {
   return (
     msg.message.conversation ||
@@ -40,33 +45,23 @@ async function startBot() {
   });
 
   sock.ev.on('group-participants.update', async (event) => {
+    if (event.action !== 'promote') return;
     const botNumber = sock.user.id.split(':')[0];
+    const botPromoted = event.participants.some((p) => p.startsWith(botNumber));
+    if (!botPromoted) return;
+
     const groupJid = event.id;
-
-    if (event.action === 'promote') {
-      const botPromoted = event.participants.some((p) => p.startsWith(botNumber));
-      if (botPromoted) {
-        try {
-          await sock.groupSettingUpdate(groupJid, 'announcement');
-          await sock.sendMessage(groupJid, { text: 'I was made admin — this group is now locked to admin-only messaging.' });
-        } catch (err) {
-          console.error('lock group failed:', err);
-        }
-      }
-      return;
+    try {
+      db.setGroupJid(groupJid);
+      await sock.groupSettingUpdate(groupJid, 'announcement');
+      await sock.groupSettingUpdate(groupJid, 'locked');
+      await sock.sendMessage(groupJid, {
+        text: "BellBoy is now active as group admin 🤖\n\nThis group is now admin-only for messaging and group info edits. I'll route resident complaints, dues reminders, and society announcements here automatically.",
+      });
+      console.log('Group linked and locked:', groupJid);
+    } catch (err) {
+      console.error('group takeover failed:', err);
     }
-
-    if (event.action !== 'add') return;
-    const botAdded = event.participants.some((p) => p.startsWith(botNumber));
-    if (!botAdded) return;
-
-    const inviter = event.author;
-    db.registerPendingSociety(groupJid, inviter);
-
-    await sock.sendMessage(groupJid, {
-      text: `Hi! I'm the Bellboy bot 👋\n\n${inviter ? '@' + inviter.split('@')[0] + ' ' : ''}please reply here with your society's name to finish setup.`,
-      mentions: inviter ? [inviter] : [],
-    });
   });
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -75,165 +70,149 @@ async function startBot() {
 
     const from = msg.key.remoteJid;
     const isGroup = from.endsWith('@g.us');
-    const sender = isGroup ? (msg.key.participantPn || msg.key.participant) : (msg.key.senderPn || msg.key.remoteJidAlt || from);
+    if (isGroup) return;
+
+    const sender = msg.key.senderPn || msg.key.remoteJidAlt || from;
     const text = extractText(msg);
-    console.log('INCOMING', JSON.stringify({ from, isGroup, sender, key: msg.key, text }));
     if (!text) return;
 
     try {
-      if (isGroup) {
-        await handleGroupMessage(sock, from, sender, text);
-      } else {
-        await handlePrivateMessage(sock, from, sender, text);
-      }
+      await handleDM(sock, from, sender, text.trim());
     } catch (err) {
       console.error('handler error:', err);
     }
   });
 }
 
-async function handlePrivateMessage(sock, chatJid, identityJid, text) {
-  const clean = text.trim().toLowerCase();
+async function handleDM(sock, chatJid, identityJid, text) {
+  const clean = text.toLowerCase();
+  const role = db.getUserRole(identityJid);
 
-  if (['hi', 'hello', 'hey', 'menu'].includes(clean)) {
-    const user = db.getUser(identityJid);
-    if (!user?.societyGroupJid) {
-      db.setUserState(identityJid, 'awaiting_code');
-      await sock.sendMessage(chatJid, { text: 'Welcome to Bellboy 👋\nPlease enter your society code to get started.' });
-    } else {
+  if (!role) {
+    if (text === RESIDENT_KEY) {
+      db.setUserRole(identityJid, 'resident');
       db.setUserState(identityJid, 'menu');
-      await sock.sendMessage(chatJid, { text: 'What would you like to do?\n1. Check maintenance dues\n2. Register a complaint\n\nReply with 1 or 2.' });
-    }
-    return;
-  }
-
-  const state = db.getUserState(identityJid);
-
-  if (state === 'awaiting_code') {
-    const society = db.getSocietyByCode(text.trim());
-    if (!society) {
-      await sock.sendMessage(chatJid, { text: 'Code not recognized. Please check with your society admin and try again.' });
+      await sendResidentMenu(sock, chatJid);
       return;
     }
-    db.linkUserToSociety(identityJid, society.groupJid);
-    db.setUserState(identityJid, 'menu');
-    await sock.sendMessage(chatJid, {
-      text: `Linked to ${society.name} ✅\n\nWhat would you like to do?\n1. Check maintenance dues\n2. Register a complaint\n\nReply with 1 or 2.`,
-    });
+    if (text === ADMIN_KEY) {
+      db.setUserRole(identityJid, 'admin');
+      db.setUserState(identityJid, 'menu');
+      await sendAdminMenu(sock, chatJid);
+      return;
+    }
+    await sock.sendMessage(chatJid, { text: '🔒 Access restricted.\nPlease enter your access key to continue.' });
     return;
   }
+
+  if (['hi', 'hello', 'hey', 'menu'].includes(clean)) {
+    db.setUserState(identityJid, 'menu');
+    if (role === 'resident') await sendResidentMenu(sock, chatJid);
+    else await sendAdminMenu(sock, chatJid);
+    return;
+  }
+
+  if (role === 'resident') return handleResident(sock, chatJid, identityJid, clean, text);
+  return handleAdmin(sock, chatJid, identityJid, clean, text);
+}
+
+async function sendResidentMenu(sock, chatJid) {
+  await sock.sendMessage(chatJid, {
+    text: 'Resident Portal 🏠\n1. Check maintenance dues\n2. Register a complaint\n3. Facility & venue directory\n\nReply with a number.',
+  });
+}
+
+async function sendAdminMenu(sock, chatJid) {
+  await sock.sendMessage(chatJid, {
+    text: 'Admin Portal 🛠️\n1. Broadcast dues reminder\n2. Send society announcement\n3. Publish event/venue update\n\nReply with a number.',
+  });
+}
+
+async function handleResident(sock, chatJid, identityJid, clean, text) {
+  const state = db.getUserState(identityJid);
 
   if (state === 'menu') {
     if (clean === '1') {
-      await sock.sendMessage(chatJid, { text: 'Maintenance status: no dues pending. (placeholder — connect to billing system)' });
+      await sock.sendMessage(chatJid, { text: `Maintenance Dues 💰\nPending: ${DUES_AMOUNT}\nDeadline: ${DUES_DEADLINE}` });
     } else if (clean === '2') {
       db.setUserState(identityJid, 'awaiting_complaint');
       await sock.sendMessage(chatJid, { text: 'Please describe your complaint in one message.' });
+    } else if (clean === '3') {
+      await sock.sendMessage(chatJid, {
+        text: 'Facility Directory 🏢\nClubhouse: 9AM–9PM, book via office\nGym: 6AM–10PM\nSwimming pool: 6AM–8PM (seasonal)\nParking: assigned slots only',
+      });
     } else {
-      await sock.sendMessage(chatJid, { text: 'Please reply with 1 or 2.' });
+      await sock.sendMessage(chatJid, { text: 'Please reply with 1, 2, or 3.' });
     }
     return;
   }
 
   if (state === 'awaiting_complaint') {
-    const user = db.getUser(identityJid);
-    const society = db.getSocietyByGroupJid(user.societyGroupJid);
-    await sock.sendMessage(society.groupJid, { text: `📢 New complaint\nFrom: ${identityJid.split('@')[0]}\n\n${text}` });
-    await sock.sendMessage(chatJid, { text: 'Complaint forwarded to your society ✅' });
+    const groupJid = db.getGroupJid();
+    const ticket = db.nextTicketId();
+    if (groupJid) {
+      await sock.sendMessage(groupJid, {
+        text: `📢 New Complaint [${ticket}]\nFrom: ${identityJid.split('@')[0]}\n\n${text}`,
+      });
+    }
+    await sock.sendMessage(chatJid, {
+      text: `Complaint logged ✅\nTicket ID: ${ticket}${groupJid ? '' : '\n(No group linked yet — visible to admin here only.)'}`,
+    });
     db.setUserState(identityJid, 'menu');
     return;
   }
 
-  await sock.sendMessage(chatJid, { text: "Say 'hi' to get started." });
+  await sendResidentMenu(sock, chatJid);
 }
 
-async function handleGroupMessage(sock, groupJid, sender, text) {
-  const existingSociety = db.getSocietyByGroupJid(groupJid);
+async function handleAdmin(sock, chatJid, identityJid, clean, text) {
+  const state = db.getUserState(identityJid);
+  const groupJid = db.getGroupJid();
 
-  if (!existingSociety && text.trim().toLowerCase().startsWith('/setup ')) {
-    const metadata = await sock.groupMetadata(groupJid);
-    const participant = metadata.participants.find((p) => p.id === sender);
-    const isAdmin = participant?.admin === 'admin' || participant?.admin === 'superadmin';
-    if (!isAdmin) {
-      await sock.sendMessage(groupJid, { text: 'Only a group admin can run /setup.' });
+  if (state === 'menu') {
+    if (clean === '1') {
+      if (!groupJid) return sock.sendMessage(chatJid, { text: 'No group linked yet. Add and promote the bot to admin in the society group first.' });
+      await sock.sendMessage(groupJid, { text: `🔔 Dues Reminder\nMaintenance of ${DUES_AMOUNT} per flat is due by ${DUES_DEADLINE}. Please clear pending dues.` });
+      await sock.sendMessage(chatJid, { text: 'Dues reminder broadcast to group ✅' });
+    } else if (clean === '2') {
+      db.setUserState(identityJid, 'awaiting_announcement');
+      await sock.sendMessage(chatJid, { text: 'Send the announcement text now.' });
+    } else if (clean === '3') {
+      db.setUserState(identityJid, 'awaiting_event');
+      await sock.sendMessage(chatJid, { text: 'Send the event/venue update text now.' });
+    } else {
+      await sock.sendMessage(chatJid, { text: 'Please reply with 1, 2, or 3.' });
+    }
+    return;
+  }
+
+  if (state === 'awaiting_announcement' || state === 'awaiting_event') {
+    if (!groupJid) {
+      await sock.sendMessage(chatJid, { text: 'No group linked yet. Add and promote the bot to admin in the society group first.' });
+      db.setUserState(identityJid, 'menu');
       return;
     }
-    const name = text.trim().slice(7).trim();
-    const code = db.finalizeSociety(groupJid, name);
-    await sock.groupSettingUpdate(groupJid, 'announcement');
-    await sock.sendMessage(groupJid, {
-      text: `Society "${name}" registered ✅\nGroup is now admin-only.\nShare this code with residents to register: ${code}`,
-    });
+    const label = state === 'awaiting_announcement' ? '📣 Society Announcement' : '🎉 Event & Venue Update';
+    await sock.sendMessage(groupJid, { text: `${label}\n\n${text}` });
+    await sock.sendMessage(chatJid, { text: 'Sent to group ✅' });
+    db.setUserState(identityJid, 'menu');
     return;
   }
 
-  const pending = db.getPendingSociety(groupJid);
-  if (pending) {
-    if (sender !== pending.inviter) return;
-    const code = db.finalizeSociety(groupJid, text.trim());
-    await sock.groupSettingUpdate(groupJid, 'announcement');
-    await sock.sendMessage(groupJid, {
-      text: `Society "${text.trim()}" registered ✅\nGroup is now admin-only.\nShare this code with residents to register: ${code}`,
-    });
-    return;
-  }
-
-  const society = db.getSocietyByGroupJid(groupJid);
-  if (!society) return;
-
-  const metadata = await sock.groupMetadata(groupJid);
-  const participant = metadata.participants.find((p) => p.id === sender);
-  const isAdmin = participant?.admin === 'admin' || participant?.admin === 'superadmin';
-  if (!isAdmin) return;
-
-  const state = db.getGroupAdminState(groupJid, sender);
-
-  if (!state) {
-    db.setGroupAdminState(groupJid, sender, 'confirm_announcement');
-    await sock.sendMessage(groupJid, {
-      text: `Hi @${sender.split('@')[0]}, do you want to send an announcement to the group? (yes/no)`,
-      mentions: [sender],
-    });
-    return;
-  }
-
-  if (state === 'confirm_announcement') {
-    if (text.trim().toLowerCase() === 'yes') {
-      db.setGroupAdminState(groupJid, sender, 'awaiting_text');
-      await sock.sendMessage(groupJid, { text: 'Send the announcement text now.' });
-    } else {
-      db.clearGroupAdminState(groupJid, sender);
-    }
-    return;
-  }
-
-  if (state === 'awaiting_text') {
-    const members = metadata.participants.map((p) => p.id).filter((id) => id !== sender && !id.startsWith(sock.user.id.split(':')[0]));
-    let sentCount = 0;
-    for (const member of members) {
-      try {
-        await sock.sendMessage(member, { text: `📢 Announcement from ${society.name}:\n\n${text}` });
-        sentCount++;
-      } catch (err) {
-        console.error('announcement send failed for', member, err.message);
-      }
-      await new Promise((r) => setTimeout(r, 400));
-    }
-    db.clearGroupAdminState(groupJid, sender);
-    await sock.sendMessage(groupJid, { text: `Announcement sent to ${sentCount}/${members.length} members ✅` });
-    return;
-  }
+  await sendAdminMenu(sock, chatJid);
 }
 
 const app = express();
-app.get('/', (req, res) => res.send('Bellboy bot running'));
+app.get('/', (req, res) => res.send('BellBoy bot running'));
+
 app.get('/qr', async (req, res) => {
   if (!latestQR) return res.send('No QR pending — either already logged in, or waiting on connection. Refresh in a few seconds.');
   const dataUrl = await QRCode.toDataURL(latestQR);
   res.send(`<html><body style="text-align:center"><img src="${dataUrl}"/><script>setTimeout(()=>location.reload(),5000)</script></body></html>`);
 });
+
 app.get('/pair', async (req, res) => {
-  const number = req.query.number; // e.g. 919876543210, no + or spaces
+  const number = req.query.number;
   if (!number) return res.send('Add your WhatsApp number: /pair?number=91XXXXXXXXXX');
   if (!global.sock) return res.send('Bot not started yet, try again shortly.');
   if (global.creds?.registered) return res.send('Already logged in.');
@@ -244,27 +223,7 @@ app.get('/pair', async (req, res) => {
     res.send('Error requesting pairing code: ' + err.message);
   }
 });
-app.get('/groups', async (req, res) => {
-  if (!global.sock) return res.send('Bot not started yet.');
-  try {
-    const groups = await global.sock.groupFetchAllParticipating();
-    const list = Object.values(groups).map((g) => `${g.id}  —  ${g.subject}`);
-    res.send('<pre>' + list.join('\n') + '</pre>');
-  } catch (err) {
-    res.send('Error: ' + err.message);
-  }
-});
-app.get('/seed', (req, res) => {
-  const { groupJid, name, resident } = req.query;
-  if (!groupJid || !name || !resident) {
-    return res.send('Usage: /seed?groupJid=XXXX@g.us&name=TestSociety&resident=919821343638');
-  }
-  const code = db.finalizeSociety(groupJid, name);
-  const residentJid = resident.includes('@') ? resident : `${resident}@s.whatsapp.net`;
-  db.linkUserToSociety(residentJid, groupJid);
-  db.setUserState(residentJid, 'menu');
-  res.send(`Seeded "${name}" (code: ${code}) for group ${groupJid}, linked resident ${residentJid}. This did NOT change the group's admin-only setting.`);
-});
+
 app.get('/debug', (req, res) => {
   const fs = require('fs');
   const path = require('path');
@@ -272,23 +231,6 @@ app.get('/debug', (req, res) => {
   if (!fs.existsSync(file)) return res.send('No data.json yet.');
   res.type('json').send(fs.readFileSync(file, 'utf8'));
 });
+
 app.listen(process.env.PORT || 3000);
-
-function autoSeed() {
-  const { SEED_GROUP_JID, SEED_SOCIETY_NAME, SEED_RESIDENT } = process.env;
-  if (!SEED_GROUP_JID || !SEED_SOCIETY_NAME || !SEED_RESIDENT) return;
-  if (!db.getSocietyByGroupJid(SEED_GROUP_JID)) {
-    const code = db.finalizeSociety(SEED_GROUP_JID, SEED_SOCIETY_NAME);
-    console.log(`Auto-seeded ${SEED_SOCIETY_NAME} (${code}) for ${SEED_GROUP_JID}`);
-  }
-  const residents = SEED_RESIDENT.split(',').map((r) => r.trim()).filter(Boolean);
-  for (const resident of residents) {
-    const residentJid = resident.includes('@') ? resident : `${resident}@s.whatsapp.net`;
-    db.linkUserToSociety(residentJid, SEED_GROUP_JID);
-    db.setUserState(residentJid, 'menu');
-    console.log(`Linked resident ${residentJid}`);
-  }
-}
-
-autoSeed();
 startBot();

@@ -4,22 +4,26 @@ const FILE = path.join(__dirname, 'data.json');
 
 function load() {
   if (!fs.existsSync(FILE)) {
-    return { users: {}, societies: {}, pendingSocieties: {}, groupAdminStates: {} };
+    return { users: {}, groupJid: null, ticketSeq: 0 };
   }
   return JSON.parse(fs.readFileSync(FILE, 'utf8'));
 }
-
 function save(data) {
   fs.writeFileSync(FILE, JSON.stringify(data, null, 2));
-}
-
-function genCode() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
 module.exports = {
   getUser(jid) {
     return load().users[jid];
+  },
+  setUserRole(jid, role) {
+    const d = load();
+    d.users[jid] = d.users[jid] || {};
+    d.users[jid].role = role;
+    save(d);
+  },
+  getUserRole(jid) {
+    return load().users[jid]?.role;
   },
   setUserState(jid, state) {
     const d = load();
@@ -30,45 +34,18 @@ module.exports = {
   getUserState(jid) {
     return load().users[jid]?.state;
   },
-  linkUserToSociety(jid, groupJid) {
+  setGroupJid(jid) {
     const d = load();
-    d.users[jid] = d.users[jid] || {};
-    d.users[jid].societyGroupJid = groupJid;
+    d.groupJid = jid;
     save(d);
   },
-  getSocietyByCode(code) {
-    return Object.values(load().societies).find(s => s.code === code.toUpperCase());
+  getGroupJid() {
+    return load().groupJid;
   },
-  getSocietyByGroupJid(groupJid) {
-    return load().societies[groupJid];
-  },
-  registerPendingSociety(groupJid, inviter) {
+  nextTicketId() {
     const d = load();
-    d.pendingSocieties[groupJid] = { inviter };
+    d.ticketSeq = (d.ticketSeq || 0) + 1;
     save(d);
-  },
-  getPendingSociety(groupJid) {
-    return load().pendingSocieties[groupJid];
-  },
-  finalizeSociety(groupJid, name) {
-    const d = load();
-    const code = genCode();
-    d.societies[groupJid] = { name, groupJid, code };
-    delete d.pendingSocieties[groupJid];
-    save(d);
-    return code;
-  },
-  getGroupAdminState(groupJid, adminJid) {
-    return load().groupAdminStates[`${groupJid}:${adminJid}`];
-  },
-  setGroupAdminState(groupJid, adminJid, state) {
-    const d = load();
-    d.groupAdminStates[`${groupJid}:${adminJid}`] = state;
-    save(d);
-  },
-  clearGroupAdminState(groupJid, adminJid) {
-    const d = load();
-    delete d.groupAdminStates[`${groupJid}:${adminJid}`];
-    save(d);
+    return `TCK-${String(d.ticketSeq).padStart(4, '0')}`;
   },
 };
