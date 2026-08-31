@@ -59,6 +59,12 @@ async function startBot() {
       console.log('Group linked and locked:', groupJid);
     } catch (err) {
       console.error('group takeover attempt failed (likely not actually promoted, or a different participant was promoted):', err.message);
+      try {
+        await sock.sendMessage(groupJid, { text: `/link ${groupJid}` });
+        await sock.sendMessage(groupJid, { text: 'Admin, please forward the message above to me in DM to finish setup.' });
+      } catch (err2) {
+        console.error('fallback link message failed:', err2.message);
+      }
     }
   });
 
