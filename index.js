@@ -2,14 +2,50 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const P = require('pino');
 const QRCode = require('qrcode');
 const express = require('express');
+const { createClient } = require('@supabase/supabase-js');
 const db = require('./db');
+const accounts = require('./accounts.js');
 
 let latestQR = null;
 
-const RESIDENT_KEY = process.env.RESIDENT_ACCESS_KEY || 'RES123';
-const ADMIN_KEY = process.env.ADMIN_ACCESS_KEY || 'ADM999';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const DUES_AMOUNT = '₹3,000';
 const DUES_DEADLINE = '5th of this month';
+
+// fresh client per verification attempt — never share one client's session across users
+function freshSupabase() {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } });
+}
+
+async function verifyAccount(email, password) {
+  const supabase = freshSupabase();
+  const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+  if (authError || !authData?.user) return { ok: false, message: authError?.message || 'Invalid email or password.' };
+
+  const { data: memberships, error: memberError } = await supabase
+    .from('society_members')
+    .select('role, society_id, societies(name)')
+    .eq('user_id', authData.user.id)
+    .eq('status', 'active');
+  if (memberError || !memberships?.length) return { ok: false, message: 'That account is not an active member of any society yet.' };
+
+  const membership = memberships.find(m => m.role === 'admin' || m.role === 'committee') || memberships[0];
+  const botRole = (membership.role === 'admin' || membership.role === 'committee') ? 'admin' : 'resident';
+
+  const { data: profile } = await supabase.from('profiles').select('full_name').eq('id', authData.user.id).maybeSingle();
+
+  return {
+    ok: true,
+    account: {
+      userId: authData.user.id,
+      societyId: membership.society_id,
+      societyName: membership.societies?.name || '',
+      role: botRole,
+      fullName: profile?.full_name || '',
+    },
+  };
+}
 
 function extractText(msg) {
   return (
@@ -90,34 +126,50 @@ async function startBot() {
 
 async function handleDM(sock, chatJid, identityJid, text) {
   const clean = text.toLowerCase();
-  const role = db.getUserRole(identityJid);
+  const account = accounts.getAccount(identityJid);
 
-  if (!role) {
-    if (text === RESIDENT_KEY) {
-      db.setUserRole(identityJid, 'resident');
-      db.setUserState(identityJid, 'menu');
-      await sendResidentMenu(sock, chatJid);
-      return;
-    }
-    if (text === ADMIN_KEY) {
-      db.setUserRole(identityJid, 'admin');
-      db.setUserState(identityJid, 'menu');
-      await sendAdminMenu(sock, chatJid);
-      return;
-    }
-    await sock.sendMessage(chatJid, { text: '🔒 Access restricted.\nPlease enter your access key to continue.' });
-    return;
-  }
+  if (!account) return handleAuth(sock, chatJid, identityJid, clean, text);
 
   if (['hi', 'hello', 'hey', 'menu'].includes(clean)) {
     db.setUserState(identityJid, 'menu');
-    if (role === 'resident') await sendResidentMenu(sock, chatJid);
+    if (account.role === 'resident') await sendResidentMenu(sock, chatJid);
     else await sendAdminMenu(sock, chatJid);
     return;
   }
 
-  if (role === 'resident') return handleResident(sock, chatJid, identityJid, clean, text);
+  if (account.role === 'resident') return handleResident(sock, chatJid, identityJid, clean, text);
   return handleAdmin(sock, chatJid, identityJid, clean, text);
+}
+
+async function handleAuth(sock, chatJid, identityJid, clean, text) {
+  const authState = db.getUserState(identityJid);
+
+  if (authState === 'awaiting_email') {
+    accounts.setPendingEmail(identityJid, text.trim());
+    db.setUserState(identityJid, 'awaiting_password');
+    await sock.sendMessage(chatJid, { text: 'Now enter your password.\n(Note: WhatsApp does not hide this message — delete it after you send it if you share this device.)' });
+    return;
+  }
+
+  if (authState === 'awaiting_password') {
+    const email = accounts.getPendingEmail(identityJid);
+    const result = await verifyAccount(email, text.trim());
+    accounts.clearPendingEmail(identityJid);
+    if (!result.ok) {
+      db.setUserState(identityJid, 'awaiting_email');
+      await sock.sendMessage(chatJid, { text: `❌ ${result.message}\nEnter the email you're registered with to try again:` });
+      return;
+    }
+    accounts.setAccount(identityJid, result.account);
+    db.setUserState(identityJid, 'menu');
+    await sock.sendMessage(chatJid, { text: `✅ Verified as ${result.account.fullName || 'member'} — ${result.account.societyName}.` });
+    if (result.account.role === 'resident') await sendResidentMenu(sock, chatJid);
+    else await sendAdminMenu(sock, chatJid);
+    return;
+  }
+
+  db.setUserState(identityJid, 'awaiting_email');
+  await sock.sendMessage(chatJid, { text: "🔒 Let's verify your account.\nEnter the email you're registered with:" });
 }
 
 async function sendResidentMenu(sock, chatJid) {
